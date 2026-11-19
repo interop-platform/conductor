@@ -1,0 +1,56 @@
+# Keeps this fork (interop-platform/conductor) up to date with conductor-oss/conductor.
+#
+# It calls GitHub's "sync a fork branch" API, which fast-forwards the branch, or merges
+# upstream into it when the fork has commits of its own (this workflow file is one).
+#
+# Token: the default GITHUB_TOKEN cannot write files under .github/workflows/, so a sync
+# that brings upstream workflow changes fails with it. For those, add a repository secret
+# SYNC_TOKEN: a fine-grained token for this repository with Contents and Workflows set to
+# read and write. Note that a sync pushed with SYNC_TOKEN triggers this repository's other
+# push workflows (ci.yml and the ones from upstream); one pushed with GITHUB_TOKEN does not.
+name: Sync fork with upstream
+
+on:
+  schedule:
+    - cron: "17 6 * * *" # daily, 06:17 UTC
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch of this fork to sync with the same branch upstream
+        default: main
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-${{ inputs.branch || 'main' }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    # Only in a fork: if this file ever reaches the upstream repository, it does nothing.
+    if: github.event.repository.fork
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Sync the branch with upstream
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
+          BRANCH: ${{ inputs.branch || 'main' }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -o pipefail
+          if out=$(gh api -X POST "repos/$REPO/merge-upstream" -f branch="$BRANCH" 2>&1); then
+            type=$(jq -r '.merge_type' <<<"$out")
+            msg=$(jq -r '.message' <<<"$out")
+            echo "$msg ($type)"
+            echo "**$BRANCH**: $msg (\`$type\`)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::Sync of $BRANCH failed: $out"
+            case "$out" in
+              *"HTTP 409"*) echo "::error::The branch conflicts with upstream; merge upstream by hand." ;;
+              *workflow*) echo "::error::Upstream changed workflow files; add the SYNC_TOKEN secret (see the header of this file)." ;;
+            esac
+            exit 1
+          fi
